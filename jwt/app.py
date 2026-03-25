@@ -4,10 +4,26 @@ from sqlalchemy.orm import Session
 
 from database import Base, engine, SessionLocal
 import models
-from schemas import UserCreate, ItemCreate, ItemOut
+from schemas import UserCreate, ItemCreate, ItemOut, SaveMessage
 import auth
 from fastapi.responses import RedirectResponse
 
+#websockets--------------------------------------------------
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from typing import List
+from datetime import datetime
+#------------------------------------------------------------
+
+#mongodb--------------------------------------------------
+from motor.motor_asyncio import AsyncIOMotorClient
+from datetime import datetime
+
+# MongoDB 연결 (기본 로컬 주소)
+MONGO_DETAILS = "mongodb://localhost:27017"
+client = AsyncIOMotorClient(MONGO_DETAILS)
+database = client.chat_db
+message_collection = database.get_collection("messages_history")
+#------------------------------------------------------------
 
 app = FastAPI()
 
@@ -136,3 +152,88 @@ async def callback(request: Request, response: Response):
 
     # 프론트엔드로 리다이렉트
     return RedirectResponse(url="http://localhost:5173/items")
+
+#websocket-------------------------------------------------------
+class ConnectionManager:
+    def __init__(self):
+        #현재 접속중인 웹소켓 연결 객체 저장리스트
+        self.active_connections: List[WebSocket] = []
+
+    #새로운 클라이언트가 처음 접속하면
+    async def connect(self, websocket: WebSocket):
+        #접속 요청 수락(accept)
+        await websocket.accept()
+        #연결된 소켓 객체 리스트에 추가
+        self.active_connections.append(websocket)
+
+    #클라이언트가 접속 종료시
+    def disconnect(self, websocket: WebSocket):
+        #해당 소켓 객체 리스트에서 제거
+        self.active_connections.remove(websocket)
+
+    #클라이언트가 메세지 send시
+    async def broadcast(self, message: dict):
+        #리스트에 저장된 모든 소켓 객체를 하나씩 꺼내서
+        for connection in self.active_connections:
+            #클라이언트에게 json형식으로 메세지 전송
+            await connection.send_json(message)
+ 
+manager = ConnectionManager()
+ 
+@app.websocket("/ws-chat")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+ 
+    try:
+        #연결이 유지되는 동안 무한 반복하면서 클라이언트 메세지 기다림
+        while True:
+            #await사용해 json 데이터 올때까지(작업 완료될 때까지) 클라 메세지 기다리다가 메세지 받아 저장
+            data = await websocket.receive_json()
+            #받은 데이터로 메세지 형식 구성
+            message = {
+                "sender": data.get("sender", "Anonymous"),
+                "content": data.get("content", ""),
+                "type": data.get("type", "CHAT"),
+                "timestamp": datetime.now().isoformat()
+            }
+ 
+            # JOIN 처리 : 제일 처음 접속한 상태일 때
+            if message["type"] == "JOIN":
+                #content 내용 설정
+                message["content"] = f"{message['sender']} joined the chat"
+            
+            await manager.broadcast(message)
+ 
+    except WebSocketDisconnect:
+        #사용자가 브라우저 닫거나 연결을 끊으면 예외 발생
+        manager.disconnect(websocket)
+
+#채팅 내용 저장시 nosql 사용을 추천(mongodb)
+
+@app.post("/api/save-message")
+async def save_message(msg: SaveMessage):
+
+    #mongodb(단일 채팅 기능에 추가)----------------------------------
+    #기존 내용 출력(20개만)
+    history = msg.content[-20:]
+    
+    for msg in history:
+        # MongoDB의 _id(ObjectId)는 JSON 직렬화가 안되므로 문자열로 변환하거나 제외.
+        await message_collection.insert_one({
+            "sender": msg["sender"],
+            "content": msg["content"],
+            "type": msg.get("type", "CHAT"),
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        #단일 저장
+        # await message_collection.insert_one({
+        #     "sender": msg.sender,
+        #     "content": msg.content,
+        #     "type": "CHAT",
+        #     "timestamp": datetime.now().isoformat()
+        #})
+    #------------------------------------------------------------
+    return {"message": "저장 완료"}
+
+#websocket-------------------------------------------------------

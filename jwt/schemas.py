@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 class UserCreate(BaseModel):
     #데이터 생성할 때 해당 정보가 반드시 들어와있는지 확인하도록
@@ -26,3 +26,7 @@ class ItemOut(BaseModel):
 class NaverUser(BaseModel):
     id:str
     email:Optional[str] = None
+
+class SaveMessage(BaseModel):
+    sender : str
+    content : List[dict]
